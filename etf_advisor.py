@@ -15,8 +15,10 @@ ETF 买入诊断器（本地网页版，纯 Python 标准库，完全免费）
 说明：本工具只做数据分析与纪律化仓位测算，不构成投资建议。
 """
 
+import io
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -353,27 +355,6 @@ def analyze(code, capital=0.0, quote=None, meta=None):
 
     non_stock = any(w in q["name"] for w in EXCLUDE_WORDS)
 
-    # --- 网格参数（用波动率推间距）
-    step_pct = max(1.0, round(min(6.0, vol_d * 100 * 1.6), 1))
-    grids = 5
-    grid_rows = []
-    price_now = last
-    total_grid = 2 * grids
-    per_grid_money = (capital * target / total_grid) if capital > 0 else 0.0
-    for i in range(-grids, grids + 1):
-        p = round(price_now * (1 + step_pct / 100.0 * i), 3)
-        lots = int(per_grid_money // (p * 100)) if (per_grid_money and i != 0) else 0
-        grid_rows.append({
-            "level": i, "price": p,
-            "side": "买入" if i < 0 else ("现价基准" if i == 0 else "卖出"),
-            "money": round(per_grid_money, 0) if i != 0 else 0,
-            "shares": lots * 100,
-        })
-    lower = round(price_now * (1 - step_pct / 100.0 * grids), 3)
-    upper = round(price_now * (1 + step_pct / 100.0 * grids), 3)
-
-    first_batch = round(capital * target * 0.5, 0) if capital > 0 else 0.0
-
     # --- 溢价率：价格 vs 参考净值（实时 IOPV 优先，否则用官方净值）
     premium = None
     iopv, nav = q.get("iopv"), q.get("nav")
@@ -402,6 +383,27 @@ def analyze(code, capital=0.0, quote=None, meta=None):
         trend_note.insert(0, "这是货币/债券/商品类品种，股票式的估值分位和网格仓位口径都不适用，只看价格和波动参考")
     else:
         verdict, action, target = verdict_of(score)
+    # --- 网格参数（用波动率推间距）
+    step_pct = max(1.0, round(min(6.0, vol_d * 100 * 1.6), 1))
+    grids = 5
+    grid_rows = []
+    price_now = last
+    total_grid = 2 * grids
+    per_grid_money = (capital * target / total_grid) if capital > 0 else 0.0
+    for i in range(-grids, grids + 1):
+        p = round(price_now * (1 + step_pct / 100.0 * i), 3)
+        lots = int(per_grid_money // (p * 100)) if (per_grid_money and i != 0) else 0
+        grid_rows.append({
+            "level": i, "price": p,
+            "side": "买入" if i < 0 else ("现价基准" if i == 0 else "卖出"),
+            "money": round(per_grid_money, 0) if i != 0 else 0,
+            "shares": lots * 100,
+        })
+    lower = round(price_now * (1 - step_pct / 100.0 * grids), 3)
+    upper = round(price_now * (1 + step_pct / 100.0 * grids), 3)
+
+    first_batch = round(capital * target * 0.5, 0) if capital > 0 else 0.0
+
     risk = []
     if "ETF" not in q["name"].upper():
         risk.append("名称里没有 ETF 字样（%s），这更像股票/LOF，本工具按 ETF 口径测算，估值匹配可能不准" % q["name"])
@@ -1087,21 +1089,155 @@ class Handler(BaseHTTPRequestHandler):
         self._send("not found", "text/plain; charset=utf-8", 404)
 
 
-def main():
-    if len(sys.argv) > 1 and re.fullmatch(r"\d{6}", sys.argv[1]):
-        capital = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
-        print(text_report(analyze(sys.argv[1], capital)))
-        return
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
-    url = "http://%s:%d" % (HOST, PORT)
-    print("ETF 诊断器已启动：%s  （Ctrl+C 退出）" % url)
-    print("命令行模式：python etf_advisor.py 512880 200000")
+STARTUP_LNK = "ETF买入诊断器.lnk"
+
+_PS_INSTALL = """
+$ErrorActionPreference = 'Stop'
+$py = (Get-Command python.exe).Source
+$pyw = Join-Path (Split-Path $py) 'pythonw.exe'
+if (-not (Test-Path $pyw)) { $pyw = $py }
+$startup = [Environment]::GetFolderPath('Startup')
+$lnk = Join-Path $startup '%(lnk)s'
+$sh = New-Object -ComObject WScript.Shell
+$sc = $sh.CreateShortcut($lnk)
+$sc.TargetPath = $pyw
+$sc.Arguments = '"%(script)s" --silent'
+$sc.WorkingDirectory = '%(workdir)s'
+$sc.Description = 'ETF 买入诊断器（本地服务，端口 %(port)s）'
+$sc.Save()
+Write-Output ("LNK=" + $lnk)
+"""
+
+
+def startup_dir():
+    appdata = os.environ.get('APPDATA')
+    if not appdata:
+        return None
+    return os.path.join(appdata, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
+
+
+def startup_link_path():
+    d = startup_dir()
+    return os.path.join(d, STARTUP_LNK) if d else None
+
+
+def _run_powershell(script_text):
+    import subprocess
+    import tempfile
+    tmp = os.path.join(tempfile.gettempdir(), "etf_advisor_startup.ps1")
+    with io.open(tmp, "w", encoding="utf-8-sig") as f:
+        f.write(script_text)
     try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp],
+                           capture_output=True, timeout=90)
+        out = _decode_os(r.stdout) + _decode_os(r.stderr)
+        return r.returncode, out.strip()
+    except Exception as e:
+        return 1, repr(e)
+
+
+def _decode_os(b):
+    if not b:
+        return ""
+    for enc in ("utf-8", "gbk", "mbcs"):
+        try:
+            return b.decode(enc)
+        except Exception:
+            continue
+    return b.decode("utf-8", "ignore")
+
+
+def install_autostart():
+    script = os.path.abspath(__file__)
+    ps = _PS_INSTALL % {"lnk": STARTUP_LNK, "script": script,
+                        "workdir": os.path.dirname(script), "port": PORT}
+    code, msg = _run_powershell(ps)
+    target = startup_link_path()
+    if code == 0 and target and os.path.exists(target):
+        print("已安装开机自启（登录后台静默启动，不弹黑窗口）：")
+        print("  " + target)
+        print("  启动命令：pythonw etf_advisor.py --silent")
+        print("装好后重启或注销再登录，就能直接打开 http://%s:%d" % (HOST, PORT))
+        print("卸载：python etf_advisor.py --uninstall    查看状态：--status")
+        return 0
+    print("安装失败：%s" % (msg or "未生成快捷方式"))
+    print("可以在本目录双击 安装开机自启.bat 作为替代。")
+    return 1
+
+
+def uninstall_autostart():
+    target = startup_link_path()
+    if target and os.path.exists(target):
+        try:
+            os.remove(target)
+            print("已移除开机自启：%s" % target)
+            return 0
+        except Exception as e:
+            print("移除失败：%r" % e)
+            return 1
+    print("当前没有安装开机自启。")
+    return 0
+
+
+def autostart_status():
+    target = startup_link_path()
+    print("开机自启：%s" % ("已安装 " + target if target and os.path.exists(target) else "未安装"))
+    print("本机端口 %d：%s" % (PORT, "有服务在跑" if port_in_use() else "没有服务在跑"))
+    if port_in_use():
+        print("现在就能访问 http://%s:%d" % (HOST, PORT))
+    return 0
+
+
+def port_in_use():
+    import socket
+    c = socket.socket()
+    c.settimeout(0.4)
+    try:
+        return c.connect_ex((HOST, PORT)) == 0
+    finally:
+        c.close()
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] in ("--install", "--install-autostart"):
+        return install_autostart()
+    if args and args[0] in ("--uninstall", "--uninstall-autostart"):
+        return uninstall_autostart()
+    if args and args[0] in ("--status",):
+        return autostart_status()
+    silent = "--silent" in args
+    rest = [a for a in args if not a.startswith("--")]
+    if rest and re.fullmatch(r"\d{6}", rest[0]):
+        capital = float(rest[1]) if len(rest) > 1 else 0.0
+        print(text_report(analyze(rest[0], capital)))
+        return 0
+    url = "http://%s:%d" % (HOST, PORT)
+    if port_in_use():
+        # Windows 上 SO_REUSEADDR 会让重复绑定“成功”，必须自己先探测，否则两个进程抢同一端口
+        print("诊断器已经在运行，直接打开 %s（关掉这个窗口不影响已运行的服务）" % url)
+        if not silent:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        return 0
+    try:
+        srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    except OSError as e:
+        print("启动失败：端口 %d 占用异常（%s）。请先在任务管理器结束 python/pythonw 进程，或改脚本里的 PORT。" % (PORT, e))
+        return 1
+    print("ETF 诊断器已启动：%s  （关窗口或 Ctrl+C 退出）" % url)
+    print("命令行模式：python etf_advisor.py 512880 200000")
+    print("开机自启：python etf_advisor.py --install   卸载：--uninstall   状态：--status")
+    if not silent:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
     srv.serve_forever()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
