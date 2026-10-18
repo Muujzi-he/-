@@ -346,15 +346,7 @@ def analyze(code, capital=0.0, quote=None, meta=None):
         meta = index_meta(idx_code) if idx_code else None
     valuation = build_valuation(meta, idx_kw)
 
-    # --- 打分与结论（与推荐榜同一套口径）
-    score, confidence, trend_note = combine_score(valuation, price_pct_3y, ma250, last, mom_60)
     non_stock = any(w in q["name"] for w in EXCLUDE_WORDS)
-    if non_stock:
-        confidence = "不适用（非股票型 ETF）"
-        verdict, action, target = "不适用", "本工具只针对股票型 ETF 给结论", 0.0
-        trend_note.insert(0, "这是货币/债券/商品类品种，股票式的估值分位和网格仓位口径都不适用，只看价格和波动参考")
-    else:
-        verdict, action, target = verdict_of(score)
 
     # --- 网格参数（用波动率推间距）
     step_pct = max(1.0, round(min(6.0, vol_d * 100 * 1.6), 1))
@@ -393,6 +385,18 @@ def analyze(code, capital=0.0, quote=None, meta=None):
         premium = {"ref": round(prem_ref, 4), "pct": prem_pct,
                    "realtime": realtime, "nav_date": nd, "stale": nav_stale}
 
+    # --- 打分与结论（与推荐榜同一套口径）
+    score, confidence, trend_note = combine_score(
+        valuation, price_pct_3y, ma250, last, mom_60,
+        ma20=ma20, ma60=ma60, ma120=ma120, mom_120=mom_120,
+        vol_y=vol_y, amount_wan=q.get("amount_wan"),
+        premium_pct=(premium["pct"] if premium else None))
+    if non_stock:
+        confidence = "不适用（非股票型 ETF）"
+        verdict, action, target = "不适用", "本工具只针对股票型 ETF 给结论", 0.0
+        trend_note.insert(0, "这是货币/债券/商品类品种，股票式的估值分位和网格仓位口径都不适用，只看价格和波动参考")
+    else:
+        verdict, action, target = verdict_of(score)
     risk = []
     if "ETF" not in q["name"].upper():
         risk.append("名称里没有 ETF 字样（%s），这更像股票/LOF，本工具按 ETF 口径测算，估值匹配可能不准" % q["name"])
@@ -487,26 +491,105 @@ def kline_metrics(closes, last, rows=None):
     }
 
 
-def combine_score(valuation, price_pct_3y, ma250, last, mom_60):
-    """综合评分 = 0.65 估值分 + 0.35 价格分位，再做趋势修正。"""
+def combine_score(valuation, price_pct_3y, ma250, last, mom_60,
+                  ma20=None, ma60=None, ma120=None, mom_120=None,
+                  vol_y=None, amount_wan=None, premium_pct=None):
+    """综合评分：基础分（估值 40 + 价格 25 + 质量 10 + 趋势 15）+ 调整项（±10，封顶）。
+    每项加减都会留 trend_note 说明，保证可解释。"""
     trend_note = []
-    if valuation and valuation.get("value_pct") is not None:
+    has_val = valuation and valuation.get("value_pct") is not None
+
+    # --- 趋势分（0~15）：双动量 + 均线多头/空头排列
+    m120 = mom_120 or 0.0
+    aligned = None
+    if None not in (ma20, ma60, ma120):
+        if ma20 > ma60 > ma120:
+            aligned = "bull"
+        elif ma20 < ma60 < ma120:
+            aligned = "bear"
+    t = 0.0
+    if mom_60 > 15 and m120 > 10:
+        t += 8.0
+        trend_note.append("中短期趋势向上（60日 %+.0f%% / 120日 %+.0f%%）" % (mom_60, m120))
+    elif mom_60 < -10 and m120 < -10:
+        t -= 5.0
+        trend_note.append("短期下跌趋势明显（60日 %+.0f%% / 120日 %+.0f%%）" % (mom_60, m120))
+    if aligned == "bull":
+        t += 5.0
+        trend_note.append("均线多头排列（MA20>MA60>MA120），趋势健康")
+    elif aligned == "bear":
+        t -= 7.0
+        trend_note.append("均线空头排列（MA20<MA60<MA120），下跌趋势仍在延续")
+
+    # --- 基础分（合计 90 分）
+    price_score = max(0.0, min(25.0, (1 - price_pct_3y) * 25.0))
+    quality_score = 0.0
+    if has_val:
         val_score = 100 - valuation["value_pct"]
-        score = round(0.65 * val_score + 0.35 * (100 - price_pct_3y * 100), 1)
-        confidence = "高（有指数估值）"
+        value_score = val_score * 0.4
+        roe = valuation.get("roe")
+        div = valuation.get("dividend") or 0.0
+        if roe is not None:
+            if roe > 15:
+                quality_score += 5.0
+            elif roe >= 8:
+                quality_score += 2.5
+        if div > 3:
+            quality_score += 3.0
+        elif div > 2:
+            quality_score += 1.5
+        else:
+            quality_score += 1.0
+        score = round(max(0.0, min(40.0, value_score)) + price_score + quality_score + t, 1)
+        confidence = "高（估值 + 质量 + 趋势）"
     else:
         val_score = None
-        score = round(100 - price_pct_3y * 100, 1)
-        confidence = "中（仅价格分位，无估值）"
+        score = round(price_score * 1.8 + t * 1.5, 1)  # 无估值时按价格 vs 趋势估算
+        confidence = "中（仅价格与趋势，无估值/质量）"
+
+    # --- 调整项（±10 分封顶）
+    adj = 0.0
+    if vol_y is not None:
+        if vol_y > 40:
+            adj -= 5.0
+            trend_note.append("高波动（年化 %.0f%%），风险上调，调低评分" % vol_y)
+        elif vol_y > 30:
+            adj -= 2.0
+            trend_note.append("波动率偏高（年化 %.0f%%），调低评分" % vol_y)
+    if amount_wan is not None:
+        if amount_wan < 1000:
+            adj -= 5.0
+            trend_note.append("成交额过低（%.0f 万），流动性风险" % amount_wan)
+        elif amount_wan < 3000:
+            adj -= 2.0
+            trend_note.append("成交额偏小（%.0f 万），流动性一般" % amount_wan)
+    if premium_pct is not None and premium_pct >= 5:
+        adj -= 8.0
+    adj = max(-10.0, min(10.0, adj))
+
+    # --- 原有趋势惩罚（追高与深跌）
     if ma250 and last > ma250 and mom_60 > 25:
-        score = round(score - 12, 1)
+        adj -= 5.0
         trend_note.append("近60日已涨 %.0f%%，处于强势但追高风险大，评分已下调" % mom_60)
     elif ma250 and last < ma250 * 0.85:
-        score = round(score - 5, 1)
+        adj -= 2.0
         trend_note.append("价格低于年线 %.0f%%，趋势仍向下，建议放慢分批、别一次买满" % ((1 - last / ma250) * 100))
+    adj = max(-10.0, min(10.0, adj))
+
+    score = round(max(0.0, min(100.0, score + adj)), 1)
     if mom_60 < -15 and (val_score is None or val_score > 55):
         trend_note.append("近60日下跌 %.0f%% 且估值不贵，属于典型的越跌越买区间" % abs(mom_60))
-    return max(0.0, min(100.0, score)), confidence, trend_note
+    if has_val:
+        roe = valuation.get("roe")
+        div = valuation.get("dividend") or 0.0
+        quality_msg = []
+        if roe is not None and roe > 15:
+            quality_msg.append("ROE %.1f%%" % roe)
+        if div > 2:
+            quality_msg.append("股息 %.1f%%" % div)
+        if quality_msg:
+            trend_note.append("质量加分（%s）" % "，".join(quality_msg))
+    return score, confidence, trend_note
 
 
 def verdict_of(score):
