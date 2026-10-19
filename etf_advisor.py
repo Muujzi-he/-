@@ -1205,12 +1205,12 @@ def lan_ips():
     return out
 
 
-def port_in_use():
+def port_in_use(host=None, port=None):
     import socket
     c = socket.socket()
     c.settimeout(0.4)
     try:
-        return c.connect_ex((HOST, PORT)) == 0
+        return c.connect_ex((host or HOST, port or PORT)) == 0
     finally:
         c.close()
 
@@ -1225,14 +1225,30 @@ def main():
         return autostart_status()
     silent = "--silent" in args
     lan = "--lan" in args
+    if "--cloud" in args:
+        # 云端运行（阿里云函数计算自定义运行时等）：绑 0.0.0.0，端口听环境变量，不开浏览器
+        lan = True
+        silent = True
+    port = PORT
+    if "--cloud" in args:
+        try:
+            port = int(os.environ.get("CAPORT") or os.environ.get("PORT") or "9000")
+        except ValueError:
+            port = 9000
+    for a in args:
+        if a.startswith("--port="):
+            try:
+                port = int(a.split("=", 1)[1])
+            except ValueError:
+                pass
     bind_host = "0.0.0.0" if lan else HOST
     rest = [a for a in args if not a.startswith("--")]
     if rest and re.fullmatch(r"\d{6}", rest[0]):
         capital = float(rest[1]) if len(rest) > 1 else 0.0
         print(text_report(analyze(rest[0], capital)))
         return 0
-    url = "http://%s:%d" % (HOST, PORT)
-    if port_in_use():
+    url = "http://%s:%d" % (HOST, port)
+    if port_in_use("127.0.0.1", port):
         # Windows 上 SO_REUSEADDR 会让重复绑定“成功”，必须自己先探测，否则两个进程抢同一端口
         print("诊断器已经在运行，直接打开 %s（关掉这个窗口不影响已运行的服务）" % url)
         if not silent:
@@ -1242,9 +1258,9 @@ def main():
                 pass
         return 0
     try:
-        srv = ThreadingHTTPServer((bind_host, PORT), Handler)
+        srv = ThreadingHTTPServer((bind_host, port), Handler)
     except OSError as e:
-        print("启动失败：端口 %d 占用异常（%s）。请先在任务管理器结束 python/pythonw 进程，或改脚本里的 PORT。" % (PORT, e))
+        print("启动失败：端口 %d 占用异常（%s）。请先在任务管理器结束 python/pythonw 进程，或改脚本里的 PORT。" % (port, e))
         return 1
     print("ETF 诊断器已启动：%s  （关窗口或 Ctrl+C 退出）" % url)
     if lan:
@@ -1252,10 +1268,10 @@ def main():
         if ips:
             print("手机访问（要和电脑连同一个 WiFi）：")
             for ip in ips:
-                print("  http://%s:%d" % (ip, PORT))
+                print("  http://%s:%d" % (ip, port))
             print("打不开就是防火墙拦了，用管理员身份的身份执行一次：")
             print('  netsh advfirewall firewall add rule name="ETFAdvisor" dir=in action=allow '
-                  'protocol=tcp localport=%d profile=private' % PORT)
+                  'protocol=tcp localport=%d profile=private' % port)
         else:
             print("没找到局域网 IP，电脑可能没连上 WiFi/网线。")
     else:
