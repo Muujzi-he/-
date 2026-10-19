@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f1420">
+<meta name="description" content="输入沪深 ETF / 场外基金代码，直接告诉你要不要买、买多少、怎么分批。网页版，手机和电脑都能用。">
+<title>ETF 买入诊断器</title>
+<style>
+:root{--bg:#0f1420;--card:#18202e;--line:#243044;--tx:#e6edf7;--sub:#93a1b8;--up:#e5544c;--dn:#2fa46a;--ac:#4d8bf0}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.6 "Microsoft YaHei","PingFang SC",system-ui,sans-serif;-webkit-tap-highlight-color:transparent}
+.wrap{max-width:1000px;margin:0 auto;padding:22px 16px 60px}
+h1{font-size:21px;margin:0 0 4px}
+.sub{color:var(--sub);font-size:13px;margin-bottom:14px}
+.tabs{display:flex;gap:6px;margin:0 0 12px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.tabs::-webkit-scrollbar{display:none}
+.tabs b{flex:0 0 auto;background:#1c2433;border:1px solid var(--line);border-radius:9px;padding:10px 16px;font-weight:400;font-size:14px;cursor:pointer;color:#9fb0c8;user-select:none}
+.tabs b.on{background:var(--card);color:var(--tx)}
+.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:stretch;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+input{background:#0d1320;border:1px solid var(--line);color:var(--tx);padding:12px;border-radius:9px;font-size:16px;width:180px;min-height:44px}
+input::placeholder{color:#5a6a80}
+button{background:var(--ac);border:0;color:#fff;padding:12px 24px;border-radius:9px;font-size:16px;cursor:pointer;min-height:44px}
+button:disabled{opacity:.55;cursor:wait}
+button.ghost{background:#1c2433;border:1px solid var(--line);color:#bcc8dc;padding:10px 16px;font-size:14px}
+.quick{margin:10px 0 0;display:flex;gap:8px;flex-wrap:wrap}
+.quick b{background:#1c2433;border:1px solid var(--line);border-radius:20px;padding:7px 14px;font-weight:400;font-size:13px;cursor:pointer;color:#bcc8dc;user-select:none;white-space:nowrap}
+.quick b:active{background:#243045}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-top:14px}
+.card>h3{margin:0 0 10px;font-size:15px;color:#c8d4e6;font-weight:600}
+.verdict{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.tag{font-size:26px;font-weight:700;padding:8px 18px;border-radius:10px;white-space:nowrap}
+.low{background:rgba(47,164,106,.16);color:#5dd39a;border:1px solid #2fa46a55}
+.mid{background:rgba(226,168,60,.14);color:#f0c36a;border:1px solid #e2a83c55}
+.high{background:rgba(229,84,76,.14);color:#ff8b84;border:1px solid #e5544c55}
+.big{font-size:32px;font-weight:700;line-height:1.1}
+.k{color:var(--sub);font-size:12px}
+.note{color:#f0c36a;font-size:13px}
+.warn{color:#ff9b95;font-size:13px}
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin-top:6px;border-radius:8px}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:520px}
+th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--sub);font-weight:400;background:#141c29}
+tr.rec-row{cursor:pointer}
+tr.rec-row:hover td{background:#1e2734}
+tr.rec-row:active td{background:#243045}
+.grid-table td.buy{color:#5dd39a}.grid-table td.sell{color:#ff8b84}
+canvas{width:100%;height:130px;display:block;margin-top:8px}
+.filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--sub)}
+.filters select{background:#0d1320;color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:8px;font-size:14px}
+.filters .fld{display:flex;align-items:center;gap:6px}
+.filters input{width:96px;padding:8px;font-size:14px;min-height:36px}
+.filters label{display:flex;align-items:center;gap:5px;cursor:pointer}
+.filters label input{width:auto;min-height:auto}
+details.help{margin-top:14px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;font-size:13px;color:var(--sub)}
+details.help summary{cursor:pointer;color:#c8d4e6;font-size:14px;font-weight:600;outline:none}
+details.help ol{margin:8px 0 0;padding-left:20px;line-height:1.9}
+details.help li b{color:#bcc8dc}
+.foot{color:#6b7a90;font-size:12px;margin-top:18px;line-height:1.8}
+.foot b{color:#93a1b8}
+@media (max-width:760px){
+.wrap{padding:14px 10px 40px}
+h1{font-size:19px}
+.bar{flex-direction:column}
+.bar input{width:100%}
+.bar button{width:100%}
+.verdict{gap:12px}
+.big{font-size:24px}
+.tag{font-size:20px;padding:6px 14px}
+.card{padding:13px 14px}
+.filters{flex-direction:column;align-items:stretch}
+.filters .fld{flex-wrap:wrap}
+.filters select,.filters input{flex:1;min-width:0}
+.quick{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.quick::-webkit-scrollbar{display:none}
+.quick b{flex:0 0 auto}
+table{font-size:13px}
+}
+@media (max-width:420px){
+.tabs b{padding:9px 12px;font-size:13px}
+.verdict .big{font-size:21px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>ETF 买入诊断器</h1>
+<div class="sub">输入沪深 ETF / 场外基金代码 → 自动告诉你：<b>要不要买、买多少、怎么分批</b>。网页版，手机和电脑都能用，无需注册。</div>
+
+<div class="tabs">
+  <b class="on" id="tb1" onclick="tab(1)">沪深ETF · 单只诊断</b>
+  <b id="tb2" onclick="tab(2)">沪深ETF · 自动推荐</b>
+  <b id="tb3" onclick="tab(3)">富国基金 · 单只诊断</b>
+  <b id="tb4" onclick="tab(4)">富国基金 · 自动推荐</b>
+</div>
+
+<div id="pane1">
+  <div class="bar">
+    <input id="code" placeholder="ETF 代码，如 512880" maxlength="6" inputmode="numeric" autocomplete="off">
+    <input id="capital" placeholder="计划投入金额(元)，可空" style="width:220px" inputmode="decimal" autocomplete="off">
+    <button id="go" onclick="run()">诊断</button>
+  </div>
+  <div class="quick">
+    <b onclick="q('510300')">沪深300 510300</b><b onclick="q('512880')">证券 512880</b>
+    <b onclick="q('588000')">科创50 588000</b><b onclick="q('159915')">创业板 159915</b>
+    <b onclick="q('510500')">中证500 510500</b><b onclick="q('513100')">纳指 513100</b>
+    <b onclick="q('510880')">红利 510880</b>
+  </div>
+  <div id="out"><div class="card" style="color:var(--sub)">等待输入。诊断一只大约需要 2~4 秒（拉行情 + K线 + 估值）。</div></div>
+</div>
+
+<div id="pane2" style="display:none">
+  <div class="card" style="margin-top:12px">
+    <div class="filters">
+      <button id="rgo" class="ghost" onclick="loadRec()">重新筛选</button>
+      <span class="fld">模式<select id="rmode"><option value="value">估值榜（全市场找最便宜）</option><option value="hot">热度榜（成交最大 20 只）</option></select></span>
+      <span class="fld">排序<select id="rsort"><option value="score">按评分</option><option value="value">按估值分位</option><option value="amount">按成交额</option></select></span>
+      <span class="fld">数量<input id="rlimit" value="15" inputmode="numeric"></span>
+      <span class="fld">最少成交额(万)<input id="rmin" value="2000" inputmode="numeric"></span>
+      <label><input type="checkbox" id="rlow"> 只看低估（分位≤30%）</label>
+    </div>
+    <div id="rinfo" class="k" style="margin-top:10px">第一次筛选要拉全市场列表和几十只 ETF 的日线，约 10~20 秒；之后 10 分钟内直接走服务端缓存。</div>
+    <div id="rec"></div>
+  </div>
+  <div class="card"><h3>怎么用这个榜</h3><div class="k" style="line-height:1.9">
+    · 候选池 = 蛋卷有估值覆盖的约 60 个指数，在每个指数的同类 ETF 里挑成交额最大的一只做代表；<br>
+    · 榜单口径与单只诊断完全一致（同一套多因子打分），榜上分数可直接与诊断页对比；<br>
+    · 点任意一行 → 自动跳到诊断页出完整方案（含网格表和具体金额）；<br>
+    · 没有估值覆盖的品种（黄金、货币、部分冷门主题）不进榜，可在诊断页单独查。
+  </div></div>
+</div>
+
+<div id="pane3" style="display:none">
+  <div class="bar">
+    <input id="fcode" placeholder="基金代码，如 161005" maxlength="6" inputmode="numeric" autocomplete="off">
+    <input id="fcapital" placeholder="计划投入金额(元)，可空" style="width:220px" inputmode="decimal" autocomplete="off">
+    <button id="fgo" onclick="fundRun()">诊断</button>
+  </div>
+  <div class="quick" id="fquick"></div>
+  <div id="fout"><div class="card" style="color:var(--sub)">等待输入。富国等场外基金按收盘净值诊断（没有盘中行情），一次约 1~2 秒。</div></div>
+</div>
+
+<div id="pane4" style="display:none">
+  <div class="card" style="margin-top:12px">
+    <div class="filters">
+      <button id="frgo" class="ghost" onclick="loadFRec()">自动推荐</button>
+      <span class="fld">排序<select id="frsort"><option value="score">按评分</option><option value="value">按估值分位</option></select></span>
+      <label><input type="checkbox" id="frlow"> 只看低估（分位≤30%）</label>
+    </div>
+    <div id="frinfo" class="k" style="margin-top:10px">第一次自动推荐要拉全部富国代表产品的净值，约 10 秒；之后 10 分钟内直接走服务端缓存。点任意一行 → 跳到"富国基金·单只诊断"出完整方案。</div>
+    <div id="frec"></div>
+  </div>
+</div>
+
+<details class="help">
+  <summary>使用说明：功能 · 输入输出 · 交互流程</summary>
+  <ol>
+    <li><b>输入</b>：6 位沪深 ETF 代码（如 512880）必填；"计划投入金额"选填（填了会算出具体的每格金额和份数）。</li>
+    <li><b>输出（5 张卡片）</b>：① 结论与 0–100 综合评分（+操作建议）；② 估值分位（PE/PB/股息率在历史中的位置）；③ 价格位置与趋势（近 3 年分位、52 周高低、均线、年化波动，附 120 日走势图）；④ 仓位与分批计划（目标仓位、首批金额、网格区间，填金额后给完整网格价格表）；⑤ 风险提示（溢价率、流动性、波动率等）。</li>
+    <li><b>交互流程</b>：输入代码 → 点「诊断」→ 约 2~4 秒出结果；点上方任意快捷标签直接诊断；点自动推荐榜任意一行 → 跳回诊断页出完整方案。榜单按评分 / 估值分位 / 成交额排序，可勾选"只看低估"。</li>
+    <li><b>常见输入示例</b>：510300 沪深300、512880 证券、588000 科创50、159915 创业板、513100 纳指、161005 富国天惠（场外基金）。</li>
+  </ol>
+</details>
+
+<div class="foot">
+<b>评分口径（多因子，满分 100）</b>：估值分位 40% · 价格分位 25% · 质量（ROE/股息率）10% · 趋势（60/120 日双动量 + 均线排列）15% · 调整项 ±10（波动过高、流动性不足、溢价率≥5% 等扣分）。无估值覆盖的品种只按价格和趋势估算，置信度标为"中"。<br>
+<b>仓位口径</b>：目标仓位 = 把"计划投入金额"当作该品种上限算出的百分比；网格间距 = 近 250 日年化波动 ×1.6（限 1%~6%），建议首批 50% + 每格 10%、5 格打满。工具不预测涨跌，只给纪律化方案。<br>
+<b>数据来源</b>：腾讯行情与日K（东方财富备用）· 新浪全市场 ETF 列表 · 蛋卷基金指数估值 · 天天基金净值。均为公开免费接口，服务端缓存 10 分钟。<br>
+本工具只做数据分析与仓位测算，<b>不构成投资建议</b>；投资有风险，入市需谨慎。
+</div>
+
+</div>
+
+<script>
+const $=i=>document.getElementById(i);
+let _cvn=0;
+
+function q(c){$('code').value=c;run();}
+function qf(c){$('fcode').value=c;fundRun();}
+
+async function run(){
+  const c=$('code').value.trim(), m=parseFloat($('capital').value||0);
+  if(!/^\d{6}$/.test(c)){$('out').innerHTML='<div class="card warn">代码要 6 位数字，例如 510300</div>';return;}
+  $('go').disabled=true;
+  $('out').innerHTML='<div class="card" style="color:var(--sub)">正在拉取 '+c+' 的行情、K线与估值…</div>';
+  try{
+    const r=await fetch('/api/etf?code='+c+'&capital='+(m||0));
+    const j=await r.json();
+    if(j.error)throw new Error(j.error);
+    render(j,m,'out');
+  }catch(e){
+    $('out').innerHTML='<div class="card warn">失败：'+e.message+'<br><span class="k">常见原因：代码不是场内 ETF、上游接口限流。稍等再试一次。</span></div>';
+  }
+  $('go').disabled=false;
+}
+
+function cls(s){return s>=70?'low':s>=50?'mid':'high';}
+function fmt(n){return (Math.round(n)).toLocaleString('zh-CN');}
+
+function render(a,isFund,tid){
+  tid=tid||'out';const what=isFund?'基金':'ETF';
+  const v=a.valuation, m=a.metrics, p=a.plan;
+  const dec=isFund?4:3;
+  let h='';
+  h+=`<div class="card verdict">
+     <div><div class="tag ${cls(a.score)}">${a.verdict}</div><div class="k" style="margin-top:6px">${a.action}</div></div>
+     <div><div class="big">${a.score.toFixed(1)}</div><div class="k">综合评分（0-100，越高越值得买）</div></div>
+     <div><div class="big">${a.name}</div><div class="k">${a.code} ｜ ${isFund?'单位净值':'现价'} ${a.price.toFixed(dec)}（${a.change_pct>0?'+':''}${a.change_pct.toFixed(2)}%）｜ 置信度：${a.confidence}</div></div>
+   </div>`;
+  h+=`<div class="card"><h3>① 值不值得买 —— 估值</h3>`;
+  if(v&&v.value_pct!=null){
+    h+=`<div class="tbl-wrap"><table><tr><th>跟踪指数</th><th>综合分位</th><th>判断</th><th>PE(TTM)</th><th>PE分位</th><th>PB</th><th>PB分位</th><th>股息率</th><th>ROE</th></tr>
+    <tr><td>${v.index_name}</td><td><b>${v.value_pct}%</b>（用${v.used}）</td><td>${v.grade}</td><td>${v.pe==null?'-':v.pe}</td><td>${v.pe_pct}%</td><td>${v.pb==null?'-':v.pb}</td><td>${v.pb_pct}%</td><td>${v.dividend}%</td><td>${v.roe==null?'-':v.roe+'%'}</td></tr></table></div>
+    <div class="k" style="margin-top:8px">分位=当前估值在历史中的位置，越低越便宜。${v.value_pct<30?'处于历史低位，长期买入胜率相对高':v.value_pct<70?'处于历史中段，靠估值赚差价的空间有限':'处于历史高位，安全边际薄'}</div>`;
+  } else {
+    h+=`<div class="note" style="margin-top:8px">该${what}没有可用的股票式指数估值${isFund?'（主动型基金通常匹配不到指数）':''}${v&&v.index_name?'，匹配到指数：'+v.index_name:''}。下面只看价格分位。</div>`;
+  }
+  h+=`</div>`;
+  h+=`<div class="card"><h3>② 现在处于什么位置 —— 价格与趋势</h3>
+    <div class="tbl-wrap"><table><tr><th>近${m.pct_window}年价格分位</th><th>52周高/低</th><th>距高点</th><th>距低点</th><th>MA20/60/250</th><th>年化波动</th><th>近60日涨跌</th></tr>
+    <tr><td><b>${m.price_pct_3y}%</b>（样本${a.history_years}年）</td><td>${m.hi_52w.toFixed(dec)} / ${m.lo_52w.toFixed(dec)}</td>
+    <td>${m.drawdown_from_hi}%</td><td>+${m.up_from_lo}%</td>
+    <td>${m.ma20} / ${m.ma60} / ${m.ma250}</td><td>${m.vol_y}%</td><td>${m.mom_60>0?'+':''}${m.mom_60}%</td></tr></table></div>
+    <canvas id="cv${++_cvn}"></canvas>`;
+  (a.trend_note||[]).forEach(t=>{h+=`<div class="note">· ${t}</div>`;});
+  if(a.premium&&a.premium.pct!=null){
+    const pm=a.premium, big=Math.abs(pm.pct)>=2;
+    const src=pm.realtime?'实时 IOPV':'官方净值'+(pm.nav_date?' @ '+pm.nav_date:'')+(pm.stale?'（QDII 净值滞后，近似值）':'');
+    h+=`<div class="${big?'warn':'note'}" style="margin-top:6px">${pm.pct>=0?'溢价':'折价'} <b>${Math.abs(pm.pct)}%</b>　参考净值 ${pm.ref}（${src}）${Math.abs(pm.pct)>=5?'　—— 偏离严重，慎买':''}</div>`;
+  }
+  h+=`</div>`;
+  h+=`<div class="card"><h3>③ 买多少 —— 仓位与分批</h3>
+    <div class="tbl-wrap"><table><tr><th>建议目标仓位</th><th>首批投入</th><th>每格间距</th><th>网格区间</th><th>每格金额</th></tr>
+    <tr><td><b>${p.target_ratio}%</b>（占计划金额）</td><td>${p.capital?fmt(p.first_batch)+' 元':'设了金额才有'}</td>
+    <td>${p.step_pct}%</td><td>${p.lower.toFixed(dec)} ~ ${p.upper.toFixed(dec)}</td>
+    <td>${p.capital?fmt(p.per_grid_money)+' 元':'-'}</td></tr></table></div>
+    ${p.capital?'<div class="k" style="margin-top:6px">计划金额 '+fmt(p.capital)+' 元；跌一格补一格，涨一格卖一格，走完单边就停在边界外。</div>':'<div class="note" style="margin-top:6px">填上"计划投入金额"后会直接算出每格花多少钱、买多少份。</div>'}
+  </div>`;
+  if(p.capital){
+    h+=`<div class="card"><h3>${isFund?'④ 分批买入参考（净值每跌一格补一格）':'④ 网格价格表（可直接抄进券商条件单）'}</h3><div class="tbl-wrap"><table class="grid-table"><tr><th>档位</th><th>触发价</th><th>动作</th><th>金额</th><th>${isFund?'约买入份额(份)':'份数(100份整数倍)'}</th></tr>`;
+    p.grid_rows.forEach(r=>{const c=r.side=='买入'?'buy':'sell';
+      h+=`<tr><td>${r.level>0?'+'+r.level:r.level}</td><td>${r.price.toFixed(dec)}</td><td class="${c}">${r.side}</td><td>${r.money?fmt(r.money):'-'}</td><td>${r.shares?fmt(r.shares):'-'}</td></tr>`;});
+    h+=`</table></div><div class="k" style="margin-top:6px">${isFund?'每格按 '+fmt(p.per_grid_money)+' 元测算；场外基金按金额申购，份额≈金额÷当日净值，实际份额以基金公司确认为准。':'每格按 '+fmt(p.per_grid_money)+' 元测算；场内 ETF 1 手=100 份。'}</div></div>`;
+  }
+  h+=`<div class="card"><h3>⑤ 风险提示</h3>`;(a.risk||[]).forEach(r=>{h+=`<div class="warn">· ${r}</div>`;});
+  h+=`<div class="k" style="margin-top:6px">数据时间 ${a.generated_at}，${isFund?'净值日期':'行情时间'} ${a.quote_time}${isFund?'':'，成交额 '+fmt(a.amount_wan)+' 万元'}，样本 ${a.bars} 根${isFund?'净值':'日K'}。</div></div>`;
+  $(tid).innerHTML=h;
+  draw(a.spark,'cv'+_cvn);
+}
+
+function draw(s,cvId){
+  const cv=$(cvId||'cv');if(!cv||!s||s.length<2)return;
+  const dpr=devicePixelRatio||1, w=cv.clientWidth*dpr, hh=130*dpr;
+  cv.width=w;cv.height=hh;const x=cv.getContext('2d');
+  const mn=Math.min(...s),mx=Math.max(...s),pad=12*dpr;
+  const px=i=>pad+(w-2*pad)*i/(s.length-1), py=v=>hh-pad-(hh-2*pad)*(v-mn)/(mx-mn||1);
+  x.strokeStyle='#1f2a3b';x.lineWidth=1;
+  for(let i=1;i<4;i++){const y=hh*i/4;x.beginPath();x.moveTo(0,y);x.lineTo(w,y);x.stroke();}
+  x.beginPath();x.strokeStyle='#4d8bf0';x.lineWidth=2*dpr;
+  s.forEach((v,i)=>i?x.lineTo(px(i),py(v)):x.moveTo(px(i),py(v)));x.stroke();
+  x.lineTo(w,hh);x.lineTo(0,hh);x.closePath();x.fillStyle='rgba(77,139,240,.12)';x.fill();
+  x.fillStyle='#93a1b8';x.font=(11*dpr)+'px sans-serif';
+  x.fillText('近120日走势 高'+mx.toFixed(3)+' 低'+mn.toFixed(3),pad,14*dpr);
+}
+
+$('code').addEventListener('keydown',e=>{if(e.key=='Enter')run();});
+$('fcode').addEventListener('keydown',e=>{if(e.key=='Enter')fundRun();});
+
+const FQUICK=[['161005','富国天惠成长A'],['100038','富国沪深300增强A'],['161017','富国中证500增强A'],['100032','富国中证红利增强A'],['161024','富国军工指数A'],['161027','富国证券指数A'],['161028','富国新能源车指数A'],['161029','富国银行指数A'],['161035','富国医药主题增强A'],['161039','富国中证1000增强A'],['161022','富国创业板联接A'],['161032','富国煤炭指数A'],['100020','富国天益价值A'],['100026','富国天合稳健A'],['100056','富国低碳环保A'],['519915','富国消费主题A'],['161037','富国高端制造增强A'],['100060','富国高新产业A']];
+FQUICK.forEach(x=>{const b=document.createElement('b');b.textContent=x[1]+' '+x[0];b.onclick=()=>qf(x[0]);$('fquick').appendChild(b);});
+
+async function fundRun(){
+  const c=$('fcode').value.trim(), m=parseFloat($('fcapital').value||0);
+  if(!/^\d{6}$/.test(c)){$('fout').innerHTML='<div class="card warn">基金代码要 6 位数字，例如 161005</div>';return;}
+  $('fgo').disabled=true;
+  $('fout').innerHTML='<div class="card" style="color:var(--sub)">正在拉取 '+c+' 的净值与估值…</div>';
+  try{
+    const r=await fetch('/api/fund?code='+c+'&capital='+(m||0));
+    const j=await r.json();
+    if(j.error)throw new Error(j.error);
+    render(j,true,'fout');
+  }catch(e){
+    $('fout').innerHTML='<div class="card warn">失败：'+e.message+'<br><span class="k">稍等再试；确认是场外开放式基金代码。</span></div>';
+  }
+  $('fgo').disabled=false;
+}
+
+function tab(n){
+  $('tb1').className=n==1?'on':'';$('tb2').className=n==2?'on':'';$('tb3').className=n==3?'on':'';$('tb4').className=n==4?'on':'';
+  $('pane1').style.display=n==1?'':'none';$('pane2').style.display=n==2?'':'none';$('pane3').style.display=n==3?'':'none';$('pane4').style.display=n==4?'':'none';
+  if(n==2&&!window._rec)loadRec();
+  if(n==4&&!window._frec)loadFRec();
+}
+
+async function loadRec(){
+  const qs='/api/recommend?mode='+$('rmode').value+'&sort='+$('rsort').value+'&limit='+($('rlimit').value||15)
+    +'&min_amount='+($('rmin').value||2000)+'&only_low='+($('rlow').checked?1:0);
+  $('rgo').disabled=true;$('rinfo').innerHTML='筛选中…';
+  try{
+    const r=await fetch(qs);const j=await r.json();
+    if(j.error)throw new Error(j.error);
+    window._rec=j;renderRec(j);
+    $('rinfo').innerHTML='候选池 '+j.pool+' 只（全市场 '+j.universe+' 只股票型 ETF）｜口径：估值榜同类里成交额最大的一只做代表｜生成 '+j.generated_at
+      +(j.failed&&j.failed.length?'｜跳过 '+j.failed.length+' 只取数失败':'');
+  }catch(e){
+    $('rec').innerHTML='<div class="warn">筛选失败：'+e.message+'<br><span class="k">全市场扫描要发几十次上游请求，限流时稍等再点一次。</span></div>';
+  }
+  $('rgo').disabled=false;
+}
+
+function pill(x){
+  if(x==null)return '<span class="k">无估值</span>';
+  const c=x<30?'low':x<70?'mid':'high';
+  return '<span class="tag '+c+'" style="font-size:13px;padding:2px 9px">'+x+'%</span>';
+}
+
+function renderRec(j){
+  let h='<div class="tbl-wrap"><table class="rec"><tr><th>#</th><th>ETF</th><th>跟踪指数</th><th>估值分位</th><th>价格分位</th><th>评分</th><th>结论</th><th>建议仓位</th><th>网格间距</th><th>股息率</th><th>成交额(万)</th></tr>';
+  j.rows.forEach((x,i)=>{
+    h+='<tr class="rec-row" data-c="'+x.code+'">';
+    h+='<td>'+(i+1)+'</td><td><b>'+x.name+'</b><br><span class="k">'+x.code+' 现价'+x.price.toFixed(3)+' '+(x.mom_60>0?'+':'')+x.mom_60+'%/60日</span></td>';
+    h+='<td>'+x.index_name+'</td><td>'+pill(x.value_pct)+'</td><td>'+x.price_pct+'%</td>';
+    h+='<td><b>'+x.score+'</b></td><td>'+x.verdict+'</td><td>'+x.target+'%</td><td>'+x.step_pct+'%</td>';
+    h+='<td>'+(x.dividend==null?'-':x.dividend+'%')+'</td><td>'+Math.round(x.amount_wan).toLocaleString('zh-CN')+'</td></tr>';
+  });
+  h+='</table></div>';
+  if(!j.rows.length)h='<div class="note">这个条件下没有标的入选，放宽最少成交额或取消"只看低估"再试。</div>';
+  if(j.avoid&&j.avoid.length){
+    h+='<div style="margin-top:14px"><b style="font-size:14px">同时，这几只评分最低（不建议新开仓，持有者可考虑减）</b><div class="tbl-wrap"><table class="rec"><tr><th>ETF</th><th>跟踪指数</th><th>估值分位</th><th>价格分位</th><th>评分</th><th>结论</th></tr>';
+    j.avoid.forEach(x=>{h+='<tr class="rec-row" data-c="'+x.code+'"><td>'+x.name+'<br><span class="k">'+x.code+'</span></td><td>'+x.index_name+'</td><td>'+pill(x.value_pct)+'</td><td>'+x.price_pct+'%</td><td><b>'+x.score+'</b></td><td>'+x.verdict+'</td></tr>';});
+    h+='</table></div></div>';
+  }
+  $('rec').innerHTML=h;
+  $('rec').onclick=ev=>{const tr=ev.target.closest('tr[data-c]');if(tr)pick(tr.getAttribute('data-c'));};
+}
+
+function pick(c){$('code').value=c;tab(1);run();}
+
+async function loadFRec(){
+  const qs='/api/fund_rec?sort='+$('frsort').value+'&limit=18&only_low='+($('frlow').checked?1:0);
+  $('frgo').disabled=true;$('frinfo').innerHTML='拉取 '+FQUICK.length+' 只富国代表产品净值中…约 10 秒（主动型无指数估值时只看价格分位）';
+  try{
+    const r=await fetch(qs);const j=await r.json();
+    if(j.error)throw new Error(j.error);
+    window._frec=j;renderFRec(j);
+    $('frinfo').innerHTML='候选池 '+j.pool+' 只富国代表产品｜口径与单只诊断一致（0.65×估值分 + 0.35×价格分位）｜生成 '+j.generated_at
+      +(j.failed&&j.failed.length?'｜跳过 '+j.failed.length+' 只取数失败':'');
+  }catch(e){
+    $('frec').innerHTML='<div class="warn">筛选失败：'+e.message+'<br><span class="k">首次要拉 18 只基金的净值，限流时稍等再点一次。</span></div>';
+  }
+  $('frgo').disabled=false;
+}
+
+function renderFRec(j){
+  let h='<div class="tbl-wrap"><table class="rec"><tr><th>#</th><th>基金</th><th>跟踪指数</th><th>估值分位</th><th>价格分位</th><th>评分</th><th>结论</th><th>建议仓位</th><th>网格间距</th><th>股息率</th></tr>';
+  j.rows.forEach((x,i)=>{
+    h+='<tr class="rec-row" data-c="'+x.code+'">';
+    h+='<td>'+(i+1)+'</td><td><b>'+x.name+'</b><br><span class="k">'+x.code+' 净值'+x.price.toFixed(4)+' '+(x.mom_60>0?'+':'')+x.mom_60+'%/60日</span></td>';
+    h+='<td>'+x.index_name+'</td><td>'+pill(x.value_pct)+'</td><td>'+x.price_pct+'%</td>';
+    h+='<td><b>'+x.score+'</b></td><td>'+x.verdict+'</td><td>'+x.target+'%</td><td>'+x.step_pct+'%</td>';
+    h+='<td>'+(x.dividend==null?'-':x.dividend+'%')+'</td></tr>';
+  });
+  h+='</table></div>';
+  if(!j.rows.length)h='<div class="note">这个条件下没有标的入选，取消"只看低估"再试。</div>';
+  if(j.avoid&&j.avoid.length){
+    h+='<div style="margin-top:14px"><b style="font-size:14px">同时，这几只评分最低（不建议新开仓，持有者可考虑减）</b><div class="tbl-wrap"><table class="rec"><tr><th>基金</th><th>跟踪指数</th><th>估值分位</th><th>价格分位</th><th>评分</th><th>结论</th></tr>';
+    j.avoid.forEach(x=>{h+='<tr class="rec-row" data-c="'+x.code+'"><td>'+x.name+'<br><span class="k">'+x.code+'</span></td><td>'+x.index_name+'</td><td>'+pill(x.value_pct)+'</td><td>'+x.price_pct+'%</td><td><b>'+x.score+'</b></td><td>'+x.verdict+'</td></tr>';});
+    h+='</table></div></div>';
+  }
+  $('frec').innerHTML=h;
+  $('frec').onclick=ev=>{const tr=ev.target.closest('tr[data-c]');if(tr)fpick(tr.getAttribute('data-c'));};
+}
+
+function fpick(c){$('fcode').value=c;tab(3);fundRun();}
+</script>
+</body>
+</html>

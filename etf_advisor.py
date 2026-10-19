@@ -90,6 +90,32 @@ ETF_TO_INDEX = {
     "515170": "SZ399396", "159736": "SZ399396",
 }
 
+# 富国基金快捷入口（场内ETF已能查，这里放场外开放式基金代表产品）
+FUND_QUICK = [
+    ("161005", "富国天惠成长A"), ("100038", "富国沪深300增强A"), ("161017", "富国中证500增强A"),
+    ("100032", "富国中证红利增强A"), ("161024", "富国军工指数A"), ("161027", "富国证券指数A"),
+    ("161028", "富国新能源车指数A"), ("161029", "富国银行指数A"), ("161035", "富国医药主题增强A"),
+    ("161039", "富国中证1000增强A"), ("161022", "富国创业板联接A"), ("161032", "富国煤炭指数A"),
+    ("100020", "富国天益价值A"), ("100026", "富国天合稳健A"), ("100056", "富国低碳环保A"),
+    ("519915", "富国消费主题A"), ("161037", "富国高端制造增强A"), ("100060", "富国高新产业A"),
+]
+
+# 富国指数型基金代码 -> 蛋卷指数代码（人工核对，优先于名称匹配）
+FUND_TO_INDEX = {
+    "100038": "SH000300",   # 富国沪深300指数增强
+    "161017": "SH000905",   # 富国中证500指数增强
+    "100032": "SH000922",   # 富国中证红利指数增强
+    "161024": "SZ399967",   # 富国中证军工
+    "161027": "SZ399975",   # 富国中证全指证券公司
+    "161028": "SZ399417",   # 富国中证新能源汽车
+    "161029": "SZ399986",   # 富国中证银行
+    "161035": "SH000991",   # 富国中证医药主题增强
+    "161039": "SH000852",   # 富国中证1000增强
+    "161022": "SZ399006",   # 富国创业板ETF联接
+    "161032": "SZ399998",   # 富国中证煤炭
+    "161037": "SZ399610",   # 富国中证高端制造增强
+}
+
 # 名称关键词 -> 指数代码（用于上表没覆盖的 ETF）
 KEYWORD_TO_INDEX = [
     ("沪深300", "SH000300"), ("上证50", "SH000016"), ("中证500", "SH000905"),
@@ -205,6 +231,36 @@ def nav_date(code):
         return rows[0].get("FSRQ") if rows else None
     except Exception:
         return None
+
+
+def fund_nav_history(code, bars=900):
+    """场外基金单位净值历史（天天基金 pingzhongdata，一次全量）。
+
+    返回 [(date, unit_nav, day_pct, 0, 0, 0), ...]，按日期从旧到新；
+    高/低/成交额对场外基金恒为 0（无盘中行情概念），保留 6 元组以复用现有 _clean_rows。
+    拉不到或样本太少会抛 RuntimeError。
+    """
+    body = _get("https://fund.eastmoney.com/pingzhongdata/%s.js" % code,
+                "https://fund.eastmoney.com/", ttl=600, key="fundjs_" + code)
+    m = re.search(r"var Data_netWorthTrend = (\[.*?\]);", body, re.S)
+    if not m:
+        raise RuntimeError("代码 %s 取不到净值数据，请确认是场外开放式基金（6 位数字，如 161005 富国天惠）" % code)
+    rows = []
+    for it in json.loads(m.group(1)):
+        try:
+            x = it.get("x")
+            y = it.get("y")
+            if not x or not y:
+                continue
+            d = time.strftime("%Y-%m-%d", time.localtime(x / 1000.0))
+            pct = it.get("equityReturn") or 0.0
+            rows.append((d, float(y), float(pct), 0.0, 0.0, 0.0))
+        except (TypeError, ValueError):
+            continue
+    rows = _clean_rows(rows)[-bars:]
+    if len(rows) < 60:
+        raise RuntimeError("基金 %s 净值样本不足（%d 条），可能代码不对或刚成立" % (code, len(rows)))
+    return rows
 
 
 def daily_kline(code, bars=1000):
@@ -468,6 +524,139 @@ def analyze(code, capital=0.0, quote=None, meta=None):
         "spark_dates": [r[0] for r in k][-120:],
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+
+
+def fund_name(code):
+    """场外基金全称（天天基金 pingzhongdata 里的 fS_name）。"""
+    body = _get("https://fund.eastmoney.com/pingzhongdata/%s.js" % code,
+                "https://fund.eastmoney.com/", ttl=600, key="fundjs_" + code)
+    m = re.search(r'var fS_name = "(.*?)";', body)
+    if m and m.group(1):
+        return m.group(1)
+    raise RuntimeError("代码 %s 取不到基金名称，请确认是场外开放式基金（6 位数字）" % code)
+
+
+def fund_analyze(code, capital=0.0):
+    """场外开放式基金（富国基金等）买入诊断，口径与 ETF 版一致：
+    净值K线 -> 价格分位/趋势 -> 估值（能映射到蛋卷指数才给）-> 打分 -> 网格仓位。
+    场外基金无盘中行情/溢价，amount_wan 恒为 0，网格按金额分批。
+    """
+    code = code.strip()
+    if not re.fullmatch(r"\d{6}", code):
+        raise ValueError("基金代码请填 6 位数字，例如 161005")
+
+    name = fund_name(code)
+    rows = fund_nav_history(code)
+    closes = [r[1] for r in rows]                          # 单位净值作收盘价
+    n = len(closes)
+    last = closes[-1]
+    nav_rows = [(r[0], r[1], r[1], r[1], r[1], 0.0) for r in rows]  # 高=低=净值，兼容 kline_metrics
+
+    # --- 价格位置 / 波动 / 趋势
+    mt = kline_metrics(closes, last, rows=nav_rows)
+    price_pct_3y, pct_window = mt["price_pct_3y"], mt["pct_window"]
+    hi_52w, lo_52w = mt["hi_52w"], mt["lo_52w"]
+    drawdown_from_hi, up_from_lo = mt["drawdown_from_hi"], mt["up_from_lo"]
+    vol_d, vol_y = mt["vol_d"], mt["vol_y"]
+    ma20, ma60, ma120, ma250 = mt["ma20"], mt["ma60"], mt["ma120"], mt["ma250"]
+    mom_60, mom_120 = mt["mom_60"], mt["mom_120"]
+
+    # --- 估值：先查人工核对表，再按名称关键词匹配蛋卷指数（主动型基金通常匹配不到）
+    idx_code, idx_kw = FUND_TO_INDEX.get(code), None
+    if not idx_code:
+        for kw, ic in KEYWORD_TO_INDEX:
+            if kw in name:
+                idx_code, idx_kw = ic, kw
+                break
+    meta = index_meta(idx_code) if idx_code else None
+    valuation = build_valuation(meta, idx_kw)
+
+    non_stock = any(w in name for w in EXCLUDE_WORDS)
+
+    # --- 打分与结论（同一套口径；场外基金无成交额/溢价，两项不参与调整）
+    score, confidence, trend_note = combine_score(
+        valuation, price_pct_3y, ma250, last, mom_60,
+        ma20=ma20, ma60=ma60, ma120=ma120, mom_120=mom_120,
+        vol_y=vol_y, amount_wan=None, premium_pct=None)
+    if non_stock:
+        confidence = "不适用（非股票型基金）"
+        verdict, action, target = "不适用", "本工具只针对股票型基金给结论", 0.0
+        trend_note.insert(0, "这是货币/债券/商品类品种，股票式的估值分位和网格仓位口径都不适用")
+    else:
+        verdict, action, target = verdict_of(score)
+
+    # --- 网格参数（场外基金按金额申购，份额≈金额÷净值，无 100 份整数倍概念）
+    step_pct = max(1.0, round(min(6.0, vol_d * 100 * 1.6), 1))
+    grids = 5
+    grid_rows = []
+    price_now = last
+    total_grid = 2 * grids
+    per_grid_money = (capital * target / total_grid) if capital > 0 else 0.0
+    for i in range(-grids, grids + 1):
+        p = round(price_now * (1 + step_pct / 100.0 * i), 4)
+        money = round(per_grid_money, 0) if (per_grid_money and i != 0) else 0
+        shares = int(money / p) if money else 0
+        grid_rows.append({
+            "level": i, "price": p,
+            "side": "买入" if i < 0 else ("现价基准" if i == 0 else "卖出"),
+            "money": money, "shares": shares,
+        })
+    lower = round(price_now * (1 - step_pct / 100.0 * grids), 4)
+    upper = round(price_now * (1 + step_pct / 100.0 * grids), 4)
+    first_batch = round(capital * target * 0.5, 0) if capital > 0 else 0.0
+
+    risk = []
+    risk.append("场外基金按当日收盘净值成交：交易日 15:00 前申购按当天净值，之后顺延到下一交易日")
+    risk.append("净值一天只更新一次，盘中看不到实时价格；注意 A/C 份额费率（A 类有申购费，C 类有销售服务费）")
+    if "ETF" not in name.upper():
+        risk.append("这是场外基金而非场内 ETF：没有盘中价格与溢价/折价，赎回一般 T+1~T+3 到账")
+    if price_pct_3y < 0.15 and n < 400:
+        risk.append("成立时间较短，历史分位参考意义有限")
+    if vol_y > 35:
+        risk.append("年化波动 %.0f%%，属于高波动品种，网格要拉宽、仓位要压低" % vol_y)
+    if "债" in name or "货币" in name or "黄金" in name:
+        risk.append("该品种不适用股票式估值，结论主要看价格分位与趋势")
+    if not risk:
+        risk.append("常规风险：单边下跌时网格会越买越套，务必给该品种设总仓位上限")
+
+    return {
+        "code": code, "name": name, "price": last,
+        "change_pct": rows[-1][2], "quote_time": rows[-1][0],
+        "amount_wan": 0,
+        "bars": n, "history_years": round(n / 244.0, 1),
+        "valuation": valuation,
+        "metrics": {
+            "price_pct_3y": round(price_pct_3y * 100, 1),
+            "pct_window": pct_window,
+            "hi_52w": hi_52w, "lo_52w": lo_52w,
+            "drawdown_from_hi": round(drawdown_from_hi, 1),
+            "up_from_lo": round(up_from_lo, 1),
+            "ma20": round(ma20, 4) if ma20 else None,
+            "ma60": round(ma60, 4) if ma60 else None,
+            "ma120": round(ma120, 4) if ma120 else None,
+            "ma250": round(ma250, 4) if ma250 else None,
+            "vol_y": round(vol_y, 1),
+            "mom_60": round(mom_60, 1), "mom_120": round(mom_120, 1),
+        },
+        "premium": None,
+        "score": score, "verdict": verdict, "action": action,
+        "confidence": confidence, "trend_note": trend_note,
+        "plan": {
+            "target_ratio": round(target * 100, 0),
+            "first_batch": first_batch,
+            "per_batch": round(per_grid_money, 0),
+            "step_pct": step_pct, "grids": grids,
+            "lower": lower, "upper": upper,
+            "per_grid_money": round(per_grid_money, 0),
+            "grid_rows": grid_rows,
+            "capital": capital,
+        },
+        "risk": risk,
+        "spark": [round(c, 4) for c in closes[-120:]],
+        "spark_dates": [r[0] for r in rows][-120:],
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
 
 def kline_metrics(closes, last, rows=None):
     """从日K收盘序列算出位置/波动/趋势指标，诊断和推荐共用同一套算法。"""
@@ -798,6 +987,54 @@ def recommend(mode="value", limit=10, min_amount=2000, only_low=False, sort="sco
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
+def _score_fund(c):
+    """单只富国等场外基金 → 自动推荐表格行（口径与 _score_candidate 对齐）。"""
+    a = fund_analyze(c, 0.0)
+    v, m, pl = a["valuation"] or {}, a["metrics"], a["plan"]
+    return {
+        "code": a["code"], "name": a["name"], "price": a["price"],
+        "index_name": v.get("index_name") or "-",
+        "value_pct": v.get("value_pct"), "grade": v.get("grade") or "-",
+        "pe": v.get("pe"), "pb": v.get("pb"), "dividend": v.get("dividend"),
+        "roe": v.get("roe"),
+        "price_pct": m["price_pct_3y"], "mom_60": m["mom_60"], "vol_y": m["vol_y"],
+        "score": a["score"], "verdict": a["verdict"], "action": a["action"],
+        "target": pl["target_ratio"], "step_pct": pl["step_pct"],
+        "lower": pl["lower"], "upper": pl["upper"],
+        "amount_wan": 0, "peers": [],
+    }
+
+
+def fund_recommend(limit=10, only_low=False, sort="score"):
+    """富国代表产品自动推荐：FUND_QUICK 清单每只跑 fund_analyze，同口径打分排序。"""
+    codes = [c[0] for c in FUND_QUICK]
+    rows, failed = [], []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [(pool.submit(_score_fund, c), c) for c in codes]
+        for fu, c in futs:
+            try:
+                rows.append(fu.result())
+            except Exception as e:
+                failed.append([c, str(e)[:50]])
+    done = {r["code"] for r in rows}
+    for c in codes:  # 失败串行补一轮（缓存已热，通常一次过）
+        if c in done:
+            continue
+        try:
+            rows.append(_score_fund(c))
+        except Exception as e:
+            failed.append([c, "重试:%s" % str(e)[:40]])
+    if only_low:
+        rows = [r for r in rows if r["value_pct"] is not None and r["value_pct"] <= 30]
+    sorters = {"score": lambda x: -x["score"],
+               "value": lambda x: x["value_pct"] if x["value_pct"] is not None else 999}
+    rows.sort(key=sorters.get(sort, sorters["score"]))
+    avoid = sorted([r for r in rows if r["score"] < 45], key=lambda x: x["score"])[:5]
+    return {"rows": rows[:limit], "avoid": avoid, "pool": len(codes),
+            "failed": failed[:8],
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+
 # -------------------------------------------------------------------- 命令行报告
 
 def text_report(a):
@@ -831,6 +1068,28 @@ def text_report(a):
 
 
 # ------------------------------------------------------------------------ 页面
+
+def load_page():
+    """优先读取 web/index.html（独立维护的响应式网页版）；没有就退回内置页面。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(here, "web", "index.html"),
+              os.path.join(here, "index.html")):
+        try:
+            with io.open(p, encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            continue
+    return HTML
+
+_HTML = None
+
+
+def page_html():
+    global _HTML
+    if _HTML is None:
+        _HTML = load_page()
+    return _HTML
+
 
 HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -871,8 +1130,8 @@ canvas{width:100%;height:130px;display:block;margin-top:8px}
 .oneline input{width:88px}}
 .grid-table td.buy{color:#5dd39a}.grid-table td.sell{color:#ff8b84}
 </style></head><body><div class="wrap">
-<h1>ETF 买入诊断器</h1><div class="sub">输入沪深 ETF 代码 → 告诉你要不要买、买多少、怎么分批。数据免费公开，本地运行。</div>
-<div class="tabs"><b class="on" id="tb1" onclick="tab(1)">单只诊断</b><b id="tb2" onclick="tab(2)">自动推荐</b></div>
+<h1>ETF / 基金买入诊断器</h1><div class="sub">输入沪深 ETF 或富国等场外基金代码 → 告诉你要不要买、买多少、怎么分批。数据免费公开，本地运行。</div>
+<div class="tabs"><b class="on" id="tb1" onclick="tab(1)">沪深ETF · 单只诊断</b><b id="tb2" onclick="tab(2)">沪深ETF · 自动推荐</b><b id="tb3" onclick="tab(3)">富国基金 · 单只诊断</b><b id="tb4" onclick="tab(4)">富国基金 · 自动推荐</b></div>
 <div id="pane1">
 <div class="bar" style="margin-top:12px">
 <input id="code" placeholder="ETF代码 如 512880" maxlength="6">
@@ -902,12 +1161,33 @@ canvas{width:100%;height:130px;display:block;margin-top:8px}
 · 点任意一行 → 自动跳到诊断页出完整方案（含网格表和具体金额）；<br>
 · 没有估值覆盖的品种（黄金、货币、部分冷门主题）不进榜，可在诊断页单独查。</div></div>
 </div>
+<div id="pane3" style="display:none">
+<div class="bar" style="margin-top:12px">
+<input id="fcode" placeholder="基金代码 如 161005" maxlength="6">
+<input id="fcapital" placeholder="计划投入金额(元) 可空" style="width:210px">
+<button id="fgo" onclick="fundRun()">诊断</button>
+</div>
+<div class="quick" id="fquick"></div>
+<div id="fout"><div class="card" style="color:var(--sub)">等待输入。富国等场外基金按收盘净值诊断（没有盘中行情），一次约 1~2 秒。</div></div>
+</div>
+<div id="pane4" style="display:none">
+<div class="card" style="margin-top:12px">
+<div class="oneline">
+<button id="frgo" onclick="loadFRec()">自动推荐</button>
+<span>排序<select id="frsort"><option value="score">按评分</option><option value="value">按估值分位</option></select></span>
+<label><input type="checkbox" id="frlow" style="width:auto"> 只看低估(分位≤30%)</label>
+</div>
+<div id="frinfo" class="k" style="margin-top:8px">第一次自动推荐要拉全部富国代表产品的净值，约 10 秒；之后 10 分钟内直接走缓存。点任意一行 → 跳到"富国基金·单只诊断"出完整方案。</div>
+<div id="frec"></div>
+</div>
+</div>
 <div class="foot">评分口径：综合评分 = 0.65 × 估值分 + 0.35 × 价格分位（无估值数据时只看价格分位，置信度降为“中”），追高或破位再做小幅修正。<br>
-仓位口径：目标仓位是把“计划投入金额”当作该 ETF 的上限来算的百分比；网格间距 = 日波动率 ×1.6（限 1%~6%）。工具不预测涨跌，只给纪律化方案。<br>
-数据来源：腾讯行情 / 蛋卷基金指数估值 / 东方财富备用。不构成投资建议。</div>
+仓位口径：目标仓位是把“计划投入金额”当作该品种的上限来算的百分比；网格间距 = 日波动率 ×1.6（限 1%~6%）。工具不预测涨跌，只给纪律化方案。<br>
+数据来源：腾讯行情 / 蛋卷基金指数估值 / 东方财富备用 / 天天基金净值。不构成投资建议。</div>
 </div>
 <script>
 const $=i=>document.getElementById(i);
+let _cvn=0;
 function q(c){$('code').value=c;run();}
 async function run(){
   const c=$('code').value.trim(), m=parseFloat($('capital').value||0);
@@ -920,13 +1200,14 @@ async function run(){
   $('go').disabled=false;
 }
 function cls(s){return s>=70?'low':s>=50?'mid':'high';}
-function render(a){
+function render(a,isFund,tid){
+  tid=tid||'out';const what=isFund?'基金':'ETF';
   const v=a.valuation, m=a.metrics, p=a.plan;
   let h='';
   h+=`<div class="card verdict">
      <div><div class="tag ${cls(a.score)}">${a.verdict}</div><div class="k" style="margin-top:6px">${a.action}</div></div>
      <div><div class="big">${a.score.toFixed(1)}</div><div class="k">综合评分（0-100，越高越值得买）</div></div>
-     <div><div class="big">${a.name}</div><div class="k">${a.code} ｜ 现价 ${a.price.toFixed(3)}（${a.change_pct>0?'+':''}${a.change_pct.toFixed(2)}%）｜ 置信度：${a.confidence}</div></div>
+     <div><div class="big">${a.name}</div><div class="k">${a.code} ｜ ${isFund?'单位净值':'现价'} ${a.price.toFixed(isFund?4:3)}（${a.change_pct>0?'+':''}${a.change_pct.toFixed(2)}%）｜ 置信度：${a.confidence}</div></div>
    </div>`;
   h+=`<div class="card"><b>① 值不值得买 —— 估值</b>`;
   if(v&&v.value_pct!=null){
@@ -934,43 +1215,43 @@ function render(a){
     <tr><td>${v.index_name}</td><td><b>${v.value_pct}%</b>（用${v.used}）</td><td>${v.grade}</td><td>${v.pe==null?'-':v.pe}</td><td>${v.pe_pct}%</td><td>${v.pb==null?'-':v.pb}</td><td>${v.pb_pct}%</td><td>${v.dividend}%</td><td>${v.roe==null?'-':v.roe+'%'}</td></tr></table>
     <div class="k" style="margin-top:8px">分位=当前估值在历史中的位置，越低越便宜。${v.value_pct<30?'处于历史低位，长期买入胜率相对高':v.value_pct<70?'处于历史中段，靠估值赚差价的空间有限':'处于历史高位，安全边际薄'}</div>`;
   } else {
-    h+=`<div class="note" style="margin-top:8px">该 ETF 没有可用的股票式指数估值（或数据源未覆盖）${v&&v.index_name?'，匹配到指数：'+v.index_name:''}。下面只看价格分位。</div>`;
+    h+=`<div class="note" style="margin-top:8px">该${what}没有可用的股票式指数估值${isFund?'（主动型基金通常匹配不到指数）':''}${v&&v.index_name?'，匹配到指数：'+v.index_name:''}。下面只看价格分位。</div>`;
   }
   h+=`</div>`;
   h+=`<div class="card"><b>② 现在处于什么位置 —— 价格与趋势</b>
     <table><tr><th>近${m.pct_window}年价格分位</th><th>样本${a.history_years}年</th><th>52周高/低</th><th>距高点</th><th>距低点</th><th>MA20/60/250</th><th>年化波动</th><th>近60日涨跌</th></tr>
-    <tr><td><b>${m.price_pct_3y}%</b></td><td>${m.hi_52w.toFixed(3)} / ${m.lo_52w.toFixed(3)}</td>
+    <tr><td><b>${m.price_pct_3y}%</b></td><td>${m.hi_52w.toFixed(isFund?4:3)} / ${m.lo_52w.toFixed(isFund?4:3)}</td>
     <td>${m.drawdown_from_hi}%</td><td>+${m.up_from_lo}%</td>
     <td>${m.ma20} / ${m.ma60} / ${m.ma250}</td><td>${m.vol_y}%</td><td>${m.mom_60>0?'+':''}${m.mom_60}%</td></tr></table>
-    <canvas id="cv"></canvas>`;
+    <canvas id="cv${++_cvn}"></canvas>`;
   a.trend_note.forEach(t=>{h+=`<div class="note">· ${t}</div>`;});
-  if(a.premium&&a.premium.pct!=null){
-    const pm=a.premium, big=Math.abs(pm.pct)>=2;
-    const src=pm.realtime?'实时 IOPV':'官方净值'+(pm.nav_date?' @ '+pm.nav_date:'')+(pm.stale?'（QDII 净值滞后，近似值）':'');
-    h+=`<div class="${big?'warn':'note'}" style="margin-top:6px">${pm.pct>=0?'溢价':'折价'} <b>${Math.abs(pm.pct)}%</b>　参考净值 ${pm.ref}（${src}）${Math.abs(pm.pct)>=5?'　—— 偏离严重，慎买':''}</div>`;
-  }
-  h+=`</div>`;
+   if(a.premium&&a.premium.pct!=null){
+     const pm=a.premium, big=Math.abs(pm.pct)>=2;
+     const src=pm.realtime?'实时 IOPV':'官方净值'+(pm.nav_date?' @ '+pm.nav_date:'')+(pm.stale?'（QDII 净值滞后，近似值）':'');
+     h+=`<div class="${big?'warn':'note'}" style="margin-top:6px">${pm.pct>=0?'溢价':'折价'} <b>${Math.abs(pm.pct)}%</b>　参考净值 ${pm.ref}（${src}）${Math.abs(pm.pct)>=5?'　—— 偏离严重，慎买':''}</div>`;
+   }
+   h+=`</div>`;
   h+=`<div class="card"><b>③ 买多少 —— 仓位与分批</b>
     <table><tr><th>建议目标仓位</th><th>首批投入</th><th>每格间距</th><th>网格区间</th><th>每格金额</th></tr>
     <tr><td><b>${p.target_ratio}%</b>（占计划金额）</td><td>${p.capital?fmt(p.first_batch)+' 元':'设了金额才有'}</td>
-    <td>${p.step_pct}%</td><td>${p.lower.toFixed(3)} ~ ${p.upper.toFixed(3)}</td>
+    <td>${p.step_pct}%</td><td>${p.lower.toFixed(isFund?4:3)} ~ ${p.upper.toFixed(isFund?4:3)}</td>
     <td>${p.capital?fmt(p.per_grid_money)+' 元':'-'}</td></tr></table>
     ${p.capital?'<div class="k" style="margin-top:6px">计划金额 '+fmt(p.capital)+' 元；跌一格补一格，涨一格卖一格，走完单边就停在边界外。</div>':'<div class="note" style="margin-top:6px">填上“计划投入金额”后会直接算出每格花多少钱、买多少份。</div>'}
   </div>`;
   if(p.capital){
-    h+=`<div class="card"><b>④ 网格价格表（可直接抄进券商条件单）</b><table class="grid-table"><tr><th>档位</th><th>触发价</th><th>动作</th><th>金额</th><th>份数(100份整数倍)</th></tr>`;
+    h+=`<div class="card"><b>${isFund?'④ 分批买入参考（净值每跌一格补一格）':'④ 网格价格表（可直接抄进券商条件单）'}</b><table class="grid-table"><tr><th>档位</th><th>触发价</th><th>动作</th><th>金额</th><th>${isFund?'约买入份额(份)':'份数(100份整数倍)'}</th></tr>`;
     p.grid_rows.forEach(r=>{const c=r.side=='买入'?'buy':'sell';
-      h+=`<tr><td>${r.level>0?'+'+r.level:r.level}</td><td>${r.price.toFixed(3)}</td><td class="${c}">${r.side}</td><td>${r.money?fmt(r.money):'-'}</td><td>${r.shares?fmt(r.shares):'-'}</td></tr>`;});
-    h+=`</table><div class="k" style="margin-top:6px">每格按 ${fmt(p.per_grid_money)} 元测算；场内 ETF 1 手=100 份。</div></div>`;
+      h+=`<tr><td>${r.level>0?'+'+r.level:r.level}</td><td>${r.price.toFixed(isFund?4:3)}</td><td class="${c}">${r.side}</td><td>${r.money?fmt(r.money):'-'}</td><td>${r.shares?fmt(r.shares):'-'}</td></tr>`;});
+    h+=`</table><div class="k" style="margin-top:6px">${isFund?'每格按 '+fmt(p.per_grid_money)+' 元测算；场外基金按金额申购，份额≈金额÷当日净值，实际份额以基金公司确认为准。':'每格按 '+fmt(p.per_grid_money)+' 元测算；场内 ETF 1 手=100 份。'}</div></div>`;
   }
   h+=`<div class="card"><b>⑤ 风险提示</b>`;a.risk.forEach(r=>{h+=`<div class="warn">· ${r}</div>`;});
-  h+=`<div class="k" style="margin-top:6px">数据时间 ${a.generated_at}，行情时间 ${a.quote_time}，成交额 ${fmt(a.amount_wan)} 万元，样本 ${a.bars} 根日K。</div></div>`;
-  $('out').innerHTML=h;
-  draw(a.spark);
+  h+=`<div class="k" style="margin-top:6px">数据时间 ${a.generated_at}，${isFund?'净值日期':'行情时间'} ${a.quote_time}${isFund?'':'，成交额 '+fmt(a.amount_wan)+' 万元'}，样本 ${a.bars} 根${isFund?'净值':'日K'}。</div></div>`;
+  $(tid).innerHTML=h;
+  draw(a.spark,'cv'+_cvn);
 }
 function fmt(n){return (Math.round(n)).toLocaleString('zh-CN');}
-function draw(s){
-  const cv=$('cv');if(!cv||s.length<2)return;
+function draw(s,cvId){
+  const cv=$(cvId||'cv');if(!cv||s.length<2)return;
   const dpr=devicePixelRatio||1, w=cv.clientWidth*dpr, hh=130*dpr;
   cv.width=w;cv.height=hh;const x=cv.getContext('2d');
   const mn=Math.min(...s),mx=Math.max(...s),pad=12*dpr;
@@ -984,10 +1265,25 @@ function draw(s){
   x.fillText('近120日走势 高'+mx.toFixed(3)+' 低'+mn.toFixed(3),pad,14*dpr);
 }
 $('code').addEventListener('keydown',e=>{if(e.key=='Enter')run();});
+$('fcode').addEventListener('keydown',e=>{if(e.key=='Enter')fundRun();});
+const FQUICK=[['161005','富国天惠成长A'],['100038','富国沪深300增强A'],['161017','富国中证500增强A'],['100032','富国中证红利增强A'],['161024','富国军工指数A'],['161027','富国证券指数A'],['161028','富国新能源车指数A'],['161029','富国银行指数A'],['161035','富国医药主题增强A'],['161039','富国中证1000增强A'],['161022','富国创业板联接A'],['161032','富国煤炭指数A'],['100020','富国天益价值A'],['100026','富国天合稳健A'],['100056','富国低碳环保A'],['519915','富国消费主题A'],['161037','富国高端制造增强A'],['100060','富国高新产业A']];
+FQUICK.forEach(x=>{const b=document.createElement('b');b.textContent=x[1]+' '+x[0];b.onclick=()=>qf(x[0]);$('fquick').appendChild(b);});
+function qf(c){$('fcode').value=c;fundRun();}
+async function fundRun(){
+  const c=$('fcode').value.trim(), m=parseFloat($('fcapital').value||0);
+  if(!/^\\d{6}$/.test(c)){$('fout').innerHTML='<div class="card warn">基金代码要 6 位数字，例如 161005</div>';return;}
+  $('fgo').disabled=true;$('fout').innerHTML='<div class="card" style="color:var(--sub)">正在拉取 '+c+' 的净值与估值…</div>';
+  try{
+    const r=await fetch('/api/fund?code='+c+'&capital='+(m||0));const j=await r.json();
+    if(j.error)throw new Error(j.error);render(j,true,'fout');}
+  catch(e){$('fout').innerHTML='<div class="card warn">失败：'+e.message+'（稍等再试；确认是场外开放式基金代码）</div>';}
+  $('fgo').disabled=false;
+}
 function tab(n){
-  $('tb1').className=n==1?'on':'';$('tb2').className=n==2?'on':'';
-  $('pane1').style.display=n==1?'':'none';$('pane2').style.display=n==2?'':'none';
+  $('tb1').className=n==1?'on':'';$('tb2').className=n==2?'on':'';$('tb3').className=n==3?'on':'';$('tb4').className=n==4?'on':'';
+  $('pane1').style.display=n==1?'':'none';$('pane2').style.display=n==2?'':'none';$('pane3').style.display=n==3?'':'none';$('pane4').style.display=n==4?'':'none';
   if(n==2&&!window._rec)loadRec();
+  if(n==4&&!window._frec)loadFRec();
 }
 async function loadRec(){
   const q='/api/recommend?mode='+$('rmode').value+'&sort='+$('rsort').value+'&limit='+($('rlimit').value||15)
@@ -1026,6 +1322,36 @@ function renderRec(j){
   $('rec').onclick=ev=>{const tr=ev.target.closest('tr[data-c]');if(tr)pick(tr.getAttribute('data-c'));};
 }
 function pick(c){$('code').value=c;tab(1);run();}
+async function loadFRec(){
+  const q='/api/fund_rec?sort='+$('frsort').value+'&limit=18&only_low='+($('frlow').checked?1:0);
+  $('frgo').disabled=true;$('frinfo').innerHTML='拉取 '+FQUICK.length+' 只富国代表产品净值中…约 10 秒（主动型无指数估值时只看价格分位）';
+  try{
+    const r=await fetch(q);const j=await r.json();
+    if(j.error)throw new Error(j.error);window._frec=j;renderFRec(j);
+    $('frinfo').innerHTML='候选池 '+j.pool+' 只富国代表产品｜口径与单只诊断一致（0.65×估值分 + 0.35×价格分位）｜生成 '+j.generated_at+(j.failed.length?'｜跳过 '+j.failed.length+' 只取数失败':'');
+  }catch(e){$('frec').innerHTML='<div class="warn">筛选失败：'+e.message+'（稍等再点一次）</div>';}
+  $('frgo').disabled=false;
+}
+function renderFRec(j){
+  let h='<table class="rec"><tr><th>#</th><th>基金</th><th>跟踪指数</th><th>估值分位</th><th>价格分位</th><th>评分</th><th>结论</th><th>建议仓位</th><th>网格间距</th><th>股息率</th></tr>';
+  j.rows.forEach((x,i)=>{
+    h+='<tr data-c="'+x.code+'">';
+    h+='<td>'+(i+1)+'</td><td><b>'+x.name+'</b><br><span class="k">'+x.code+' 净值'+x.price.toFixed(4)+' '+(x.mom_60>0?'+':'')+x.mom_60+'%/60日</span></td>';
+    h+='<td>'+x.index_name+'</td><td>'+pill(x.value_pct)+'</td><td>'+x.price_pct+'%</td>';
+    h+='<td><b>'+x.score+'</b></td><td>'+x.verdict+'</td><td>'+x.target+'%</td><td>'+x.step_pct+'%</td>';
+    h+='<td>'+(x.dividend==null?'-':x.dividend+'%')+'</td></tr>';
+  });
+  h+='</table>';
+  if(!j.rows.length)h='<div class="note">这个条件下没有标的入选，取消“只看低估”再试。</div>';
+  if(j.avoid.length){
+    h+='<div style="margin-top:14px"><b style="font-size:14px">同时，这几只评分最低（不建议新开仓，持有者可考虑减）</b><table class="rec"><tr><th>基金</th><th>跟踪指数</th><th>估值分位</th><th>价格分位</th><th>评分</th><th>结论</th></tr>';
+    j.avoid.forEach(x=>{h+='<tr data-c="'+x.code+'"><td>'+x.name+'<br><span class="k">'+x.code+'</span></td><td>'+x.index_name+'</td><td>'+pill(x.value_pct)+'</td><td>'+x.price_pct+'%</td><td><b>'+x.score+'</b></td><td>'+x.verdict+'</td></tr>';});
+    h+='</table></div>';
+  }
+  $('frec').innerHTML=h;
+  $('frec').onclick=ev=>{const tr=ev.target.closest('tr[data-c]');if(tr)fpick(tr.getAttribute('data-c'));};
+}
+function fpick(c){$('fcode').value=c;tab(3);fundRun();}
 </script></body></html>"""
 
 
@@ -1047,7 +1373,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/":
-            self._send(HTML, "text/html; charset=utf-8")
+            self._send(page_html(), "text/html; charset=utf-8")
             return
         if u.path == "/api/recommend":
             q = parse_qs(u.query)
@@ -1090,6 +1416,45 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(json.dumps(analyze(code, capital), ensure_ascii=False))
             except Exception as e:
                 self._send(json.dumps({"error": str(e)}, ensure_ascii=False), code=502)
+            return
+        if u.path == "/api/fund":
+            qs = parse_qs(u.query)
+            code = (qs.get("code") or [""])[0]
+            try:
+                capital = float((qs.get("capital") or ["0"])[0] or 0)
+            except ValueError:
+                capital = 0.0
+            try:
+                self._send(json.dumps(fund_analyze(code, capital), ensure_ascii=False))
+            except Exception as e:
+                self._send(json.dumps({"error": str(e)}, ensure_ascii=False), code=502)
+            return
+        if u.path == "/api/fund_rec":
+            q = parse_qs(u.query)
+
+            def num2(name, dft, cast=float):
+                try:
+                    return cast((q.get(name) or [dft])[0])
+                except (TypeError, ValueError):
+                    return cast(dft)
+            key = "frec_%s_%s_%s" % (num2("limit", 10, int),
+                                     (q.get("only_low") or ["0"])[0],
+                                     (q.get("sort") or ["score"])[0])
+            hit = _cache.get(key)
+            if hit and time.time() - hit[0] < 600:
+                self._send(json.dumps(hit[1], ensure_ascii=False))
+                return
+            try:
+                res = fund_recommend(limit=int(num2("limit", 10, int)),
+                                     only_low=(q.get("only_low") or ["0"])[0] == "1",
+                                     sort=(q.get("sort") or ["score"])[0])
+            except Exception as e:
+                self._send(json.dumps({"error": str(e)}, ensure_ascii=False), code=502)
+                return
+            if res.get("rows"):
+                with _lock:
+                    _cache[key] = (time.time(), res)
+            self._send(json.dumps(res, ensure_ascii=False))
             return
         self._send("not found", "text/plain; charset=utf-8", 404)
 
@@ -1245,7 +1610,15 @@ def main():
     rest = [a for a in args if not a.startswith("--")]
     if rest and re.fullmatch(r"\d{6}", rest[0]):
         capital = float(rest[1]) if len(rest) > 1 else 0.0
-        print(text_report(analyze(rest[0], capital)))
+        try:
+            print(text_report(analyze(rest[0], capital)))
+        except Exception:
+            # 场内找不到的代码，当场外基金（富国基金等）再试一次
+            try:
+                print(text_report(fund_analyze(rest[0], capital)))
+            except Exception as e:
+                print("诊断失败：%s（请确认是沪深 ETF 或场外开放式基金代码）" % e)
+                return 1
         return 0
     url = "http://%s:%d" % (HOST, port)
     if port_in_use("127.0.0.1", port):

@@ -20,3 +20,6 @@ Desktop.ini
 
 # 内网穿透工具（53MB 二进制，不进仓库）
 cloudflared.exe
+
+# 应用发布标记文件（由发布工具管理）
+.wbapp_*.genie
