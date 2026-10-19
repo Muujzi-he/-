@@ -864,6 +864,11 @@ th:first-child,td:first-child{text-align:left}th{color:var(--sub);font-weight:40
 .note{color:#f0c36a;font-size:13px}.warn{color:#ff9b95;font-size:13px}
 .foot{color:#6b7a90;font-size:12px;margin-top:16px;line-height:1.7}
 canvas{width:100%;height:130px;display:block;margin-top:8px}
+@media (max-width:760px){
+.wrap{padding:14px 8px 40px}.bar{flex-direction:column}input{width:100%}
+.card{padding:12px 12px;overflow-x:auto}table{font-size:13px;white-space:nowrap}
+.verdict{gap:10px}.big{font-size:24px}.tag{font-size:20px;padding:6px 14px}
+.oneline input{width:88px}}
 .grid-table td.buy{color:#5dd39a}.grid-table td.sell{color:#ff8b84}
 </style></head><body><div class="wrap">
 <h1>ETF 买入诊断器</h1><div class="sub">输入沪深 ETF 代码 → 告诉你要不要买、买多少、怎么分批。数据免费公开，本地运行。</div>
@@ -1188,6 +1193,18 @@ def autostart_status():
     return 0
 
 
+def lan_ips():
+    """本机局域网 IP（手机连同一个 WiFi 时用这个访问）。"""
+    import socket
+    out = []
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        out = sorted({i[4][0] for i in infos if not i[4][0].startswith("127.")})
+    except Exception:
+        pass
+    return out
+
+
 def port_in_use():
     import socket
     c = socket.socket()
@@ -1207,6 +1224,8 @@ def main():
     if args and args[0] in ("--status",):
         return autostart_status()
     silent = "--silent" in args
+    lan = "--lan" in args
+    bind_host = "0.0.0.0" if lan else HOST
     rest = [a for a in args if not a.startswith("--")]
     if rest and re.fullmatch(r"\d{6}", rest[0]):
         capital = float(rest[1]) if len(rest) > 1 else 0.0
@@ -1223,13 +1242,25 @@ def main():
                 pass
         return 0
     try:
-        srv = ThreadingHTTPServer((HOST, PORT), Handler)
+        srv = ThreadingHTTPServer((bind_host, PORT), Handler)
     except OSError as e:
         print("启动失败：端口 %d 占用异常（%s）。请先在任务管理器结束 python/pythonw 进程，或改脚本里的 PORT。" % (PORT, e))
         return 1
     print("ETF 诊断器已启动：%s  （关窗口或 Ctrl+C 退出）" % url)
+    if lan:
+        ips = lan_ips()
+        if ips:
+            print("手机访问（要和电脑连同一个 WiFi）：")
+            for ip in ips:
+                print("  http://%s:%d" % (ip, PORT))
+            print("打不开就是防火墙拦了，用管理员身份的身份执行一次：")
+            print('  netsh advfirewall firewall add rule name="ETFAdvisor" dir=in action=allow '
+                  'protocol=tcp localport=%d profile=private' % PORT)
+        else:
+            print("没找到局域网 IP，电脑可能没连上 WiFi/网线。")
+    else:
+        print("要让手机也能打开，加 --lan 启动（仅限同一 WiFi）：python etf_advisor.py --lan")
     print("命令行模式：python etf_advisor.py 512880 200000")
-    print("开机自启：python etf_advisor.py --install   卸载：--uninstall   状态：--status")
     if not silent:
         try:
             webbrowser.open(url)
