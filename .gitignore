@@ -17,3 +17,6 @@ Desktop.ini
 
 # 运行日志
 *.log
+
+# 内网穿透工具（53MB 二进制，不进仓库）
+cloudflared.exe
